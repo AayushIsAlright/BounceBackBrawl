@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bounce Square</title>
+<style>
+  html,body{margin:0;height:100%;background:#fff;overflow:hidden;touch-action:none;user-select:none;-webkit-user-select:none}
+  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#fff}
+  canvas{display:block}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c"></canvas></div>
+<script>
+(()=>{
+'use strict';
+// A plain showcase of the Bounce Back Brawl bounce physics: one square, a springy floor, three platforms.
+const W=960,H=540;
+const FLOOR=480, CEIL=20, WALL_L=20, WALL_R=W-20, G=2000, HALF=30;
+const cv=document.getElementById('c'), ctx=cv.getContext('2d');
+let scale=1;
+function resize(){
+  const s=Math.min(innerWidth/W, innerHeight/H), dpr=Math.min(window.devicePixelRatio||1,3);
+  cv.style.width=(W*s)+'px'; cv.style.height=(H*s)+'px';
+  cv.width=Math.max(1,Math.round(W*s*dpr)); cv.height=Math.max(1,Math.round(H*s*dpr));
+  scale=cv.width/W;
+}
+addEventListener('resize',resize); resize();
+const clamp=(v,a,b)=>v<a?a:v>b?b:v;
+const rand=(a,b)=>a+Math.random()*(b-a);
+
+// ---------- input
+const down=new Set(), pressed=new Set();
+let idle=99;                                   // seconds since the last key press (starts in demo mode)
+const K={l:['KeyA','ArrowLeft'],r:['KeyD','ArrowRight'],u:['KeyW','ArrowUp','Space'],d:['KeyS','ArrowDown']};
+addEventListener('keydown',e=>{
+  if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Space'].indexOf(e.code)>=0) e.preventDefault();
+  if(!down.has(e.code)) pressed.add(e.code);
+  down.add(e.code); idle=0;
+});
+addEventListener('keyup',e=>{down.delete(e.code);});
+addEventListener('blur',()=>{down.clear();});
+const any=a=>a.some(k=>down.has(k)), anyP=a=>a.some(k=>pressed.has(k));
+
+// ---------- springy floor (same wave simulation as the game)
+const MN=96, MS=W/MN;
+const mat={h:new Float32Array(MN+1),v:new Float32Array(MN+1),ld:new Float32Array(MN+1),rd:new Float32Array(MN+1)};
+let matAcc=0;
+function matStep(){
+  for(let i=0;i<=MN;i++){ const a=-0.03*mat.h[i]-0.03*mat.v[i]; mat.v[i]+=a; mat.h[i]+=mat.v[i]; mat.h[i]=clamp(mat.h[i],-30,48); }
+  for(let p=0;p<6;p++){
+    for(let i=0;i<=MN;i++){
+      if(i>0){ mat.ld[i]=0.2*(mat.h[i]-mat.h[i-1]); mat.v[i-1]+=mat.ld[i]; }
+      if(i<MN){ mat.rd[i]=0.2*(mat.h[i]-mat.h[i+1]); mat.v[i+1]+=mat.rd[i]; }
+    }
+    for(let i=0;i<=MN;i++){ if(i>0) mat.h[i-1]+=mat.ld[i]; if(i<MN) mat.h[i+1]+=mat.rd[i]; }
+  }
+}
+function splashMat(x,imp){
+  const idx=Math.round(x/MS);
+  for(let d=-4;d<=4;d++){ const i=idx+d; if(i>=0&&i<=MN) mat.v[i]+=imp*0.0045*(1-Math.abs(d)/5); }
+}
+function matAt(x){ const f=clamp(x/MS,0,MN-0.001), i=f|0, t=f-i; return mat.h[i]*(1-t)+mat.h[i+1]*t; }
+
+// ---------- platforms
+const pads=[{x:200,y:390,w:130,sag:0,sagV:0},{x:W-200,y:390,w:130,sag:0,sagV:0},{x:W/2,y:300,w:150,sag:0,sagV:0}];
+
+// ---------- the cube
+const c={x:W/2,y:200,prevY:200,vx:0,vy:0,sx:1,sy:1,svx:0,svy:0,groundT:0,airJumps:1,streak:0,jumpBuf:0,held:false,slam:false,slamCd:0};
+const demo={t:0,l:false,r:false,hold:true};
+
+function distBelow(){
+  let d=FLOOR-c.y;
+  for(const p of pads) if(Math.abs(c.x-p.x)<p.w/2+14&&p.y>=c.y-2) d=Math.min(d,p.y-c.y);
+  return d;
+}
+function land(y,kind,pad){
+  const imp=c.vy; c.y=y; c.groundT=0.07; c.airJumps=1;
+  const k=clamp(imp/1500,0.15,1);
+  c.sx=1+0.5*k; c.sy=1-0.5*k; c.svx=0; c.svy=0;                 // squash on impact
+  if(kind==='floor') splashMat(c.x,imp); else pad.sagV+=imp*0.018;
+  if(c.slam){ c.slam=false; c.slamCd=0.5; c.vy=-720; return; }
+  const boosted=c.jumpBuf>0||c.held;                              // holding jump = big bounce
+  let nv;
+  if(kind==='pad') nv=boosted?1050:900;
+  else nv=boosted?1000+Math.min(c.streak,4)*30:Math.max(560,imp*0.6);
+  if(boosted) c.streak++; else c.streak=0;
+  c.vy=-nv; c.jumpBuf=0;
+}
+function step(it,dt){
+  c.prevY=c.y;
+  c.slamCd-=dt; c.jumpBuf-=dt; c.groundT-=dt;
+  c.held=it.hold;
+  if(it.jump){
+    c.jumpBuf=0.17;
+    const near=c.vy>0&&distBelow()<110;
+    if(c.airJumps>0&&c.groundT<=0&&!near){ c.airJumps--; c.vy=-820; c.sy=1.35; c.sx=0.75; }   // double jump
+  }
+  if(it.slam&&!c.slam&&c.slamCd<=0&&distBelow()>90){ c.slam=true; c.vy=1800; c.vx*=0.3; }
+  // horizontal
+  const dir=(it.r?1:0)-(it.l?1:0), acc=c.groundT>0?3600:2600, max=330;
+  if(dir) c.vx+=clamp(dir*max-c.vx,-acc*dt,acc*dt);
+  else c.vx-=c.vx*Math.min(1,(c.groundT>0?10:2.5)*dt);
+  // gravity & move
+  c.vy+=(c.slam?0:G)*dt; if(c.vy>2000) c.vy=2000;
+  c.x+=c.vx*dt; c.y+=c.vy*dt;
+  // walls
+  const xl=WALL_L+HALF, xr=WALL_R-HALF;
+  if(c.x<xl||c.x>xr){
+    const left=c.x<xl; c.x=left?xl:xr;
+    if((left&&c.vx<0)||(!left&&c.vx>0)){ c.vx=-c.vx*0.55; if(Math.abs(c.vx)<200) c.vx=left?200:-200; c.sx=0.7; c.sy=1.2; }
+  }
+  // ceiling
+  if(c.y-HALF*2<CEIL){ c.y=CEIL+HALF*2; if(c.vy<0){ c.vy=-c.vy*0.7; c.sy=0.75; c.sx=1.2; } }
+  // platforms (one-way, from above) and floor
+  if(c.vy>0) for(const p of pads){ if(c.prevY<=p.y+2&&c.y>=p.y&&Math.abs(c.x-p.x)<p.w/2+14){ land(p.y,'pad',p); break; } }
+  if(c.y>=FLOOR&&c.vy>0) land(FLOOR,'floor');
+  // squash & stretch spring
+  const tsy=1+Math.min(0.22,Math.abs(c.vy)/5000), tsx=1/Math.sqrt(tsy);
+  c.svx+=((tsx-c.sx)*650-c.svx*15)*dt; c.sx+=c.svx*dt;
+  c.svy+=((tsy-c.sy)*650-c.svy*15)*dt; c.sy+=c.svy*dt;
+  c.sx=clamp(c.sx,0.4,1.7); c.sy=clamp(c.sy,0.4,1.7);
+}
+function update(dt){
+  idle+=dt;
+  let it;
+  if(idle>4){                                                     // nobody playing: the cube shows itself off
+    demo.t-=dt;
+    if(demo.t<=0){ demo.t=rand(0.5,1.6); const k=Math.random(); demo.l=k<0.4; demo.r=k>0.6; demo.hold=Math.random()<0.85; demo.jump=Math.random()<0.3; demo.slam=Math.random()<0.12; }
+    it={l:demo.l,r:demo.r,hold:demo.hold,jump:demo.jump,slam:demo.slam}; demo.jump=demo.slam=false;
+  } else it={l:any(K.l),r:any(K.r),hold:any(K.u),jump:anyP(K.u),slam:anyP(K.d)};
+  pressed.clear();
+  for(const p of pads){ p.sagV+=(-p.sag*260-p.sagV*10)*dt; p.sag+=p.sagV*dt; p.sag=clamp(p.sag,-8,26); }
+  matAcc+=dt; while(matAcc>=1/60){ matStep(); matAcc-=1/60; }
+  const n=Math.max(1,Math.ceil(dt/(1/120))), h=dt/n;
+  for(let s=0;s<n;s++){ step(it,h); it.jump=false; it.slam=false; }
+}
+
+// ---------- drawing (plain: white background, thin dark lines, one grey cube)
+function render(){
+  ctx.setTransform(scale,0,0,scale,0,0);
+  ctx.fillStyle='#ffffff'; ctx.fillRect(0,0,W,H);
+  ctx.lineJoin='round'; ctx.lineCap='round';
+  // platforms
+  ctx.strokeStyle='#1f2933'; ctx.lineWidth=4;
+  for(const p of pads){ const y=p.y+p.sag; ctx.beginPath(); ctx.moveTo(p.x-p.w/2,y); ctx.lineTo(p.x+p.w/2,y); ctx.stroke(); }
+  // shadow on the floor
+  const dist=clamp((FLOOR-c.y)/300,0,1), fy=FLOOR+matAt(c.x);
+  ctx.fillStyle='rgba(31,41,51,'+(0.16*(1-dist))+')';
+  ctx.beginPath(); ctx.ellipse(c.x,fy+6,44*(1-dist*0.5),7*(1-dist*0.5),0,0,Math.PI*2); ctx.fill();
+  // plain square, squashed/stretched about its base
+  const sink=c.y>=FLOOR-2?matAt(c.x)*0.9:0, s=HALF*2;
+  ctx.save(); ctx.translate(c.x,c.y+sink); ctx.scale(c.sx,c.sy);
+  ctx.fillStyle='#1f2933'; ctx.fillRect(-HALF,-s,s,s);
+  ctx.restore();
+  // springy floor line
+  ctx.strokeStyle='#1f2933'; ctx.lineWidth=4;
+  ctx.beginPath(); for(let i=0;i<=MN;i++){ const y=FLOOR+mat.h[i]; if(i===0) ctx.moveTo(0,y); else ctx.lineTo(i*MS,y); } ctx.stroke();
+}
+
+let last=performance.now();
+function frame(now){
+  let dt=(now-last)/1000; last=now;
+  if(!(dt>0)) dt=1/60; if(dt>0.05) dt=0.05;
+  update(dt); render();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+window.__cube={update,render,c,down,pressed};
+})();
+</script>
+</body>
+</html>
